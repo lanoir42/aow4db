@@ -1,0 +1,55 @@
+name: sync-upstream
+# 업스트림(MinionsArt/aow4db) 변경 감지 — 포크 main을 순수 미러로 유지하고
+# Data/·Icons/·PreviewsAvif/ 변경 시에만 앱 리포로 알림(repository_dispatch).
+on:
+  schedule:
+    - cron: "0 7 * * 1,4"      # 월·목 07:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: 업스트림 병합 (fast-forward만)
+        id: merge
+        run: |
+          git remote add upstream https://github.com/MinionsArt/aow4db.git || true
+          git fetch upstream main
+          BEFORE=$(git rev-parse HEAD)
+          git merge --ff-only upstream/main || { echo "ff-only 실패 — 수동 확인 필요"; exit 1; }
+          AFTER=$(git rev-parse HEAD)
+          echo "before=$BEFORE" >> $GITHUB_OUTPUT
+          echo "after=$AFTER" >> $GITHUB_OUTPUT
+          if [ "$BEFORE" != "$AFTER" ]; then
+            CHANGED=$(git diff --name-only "$BEFORE" "$AFTER" -- Data Icons PreviewsAvif | head -50)
+            echo "changed<<EOT" >> $GITHUB_OUTPUT
+            echo "$CHANGED" >> $GITHUB_OUTPUT
+            echo "EOT" >> $GITHUB_OUTPUT
+          fi
+      - name: 푸시
+        if: steps.merge.outputs.before != steps.merge.outputs.after
+        run: git push origin main
+      - name: keepalive (60일 스케줄 자동 비활성 방지)
+        run: |
+          git config user.name "sync-bot"
+          git config user.email "sync@local"
+          date -u > .sync-heartbeat
+          git add .sync-heartbeat
+          git commit -m "chore: sync heartbeat" || exit 0
+          git push origin main
+      - name: 앱 리포에 알림
+        if: steps.merge.outputs.changed != ''
+        env:
+          GH_TOKEN: ${{ secrets.APP_REPO_TOKEN }}
+        run: |
+          [ -n "$GH_TOKEN" ] || { echo "APP_REPO_TOKEN 미설정 — 알림 생략"; exit 0; }
+          gh api repos/lanoir42/aow4-ios/dispatches \
+            -f event_type=upstream-data-changed \
+            -F "client_payload[sha]=${{ steps.merge.outputs.after }}" \
+            -F "client_payload[changed]=${{ toJSON(steps.merge.outputs.changed) }}"
